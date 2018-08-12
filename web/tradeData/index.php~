@@ -1,0 +1,3 @@
+<?php
+//select * from order_details inner join orders on order_details.id=orders.id;
+?>
