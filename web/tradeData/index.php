@@ -1,9 +1,9 @@
 <?php
 //select * from order_details inner join orders on order_details.id=orders.id;
-$host = '127.0.0.1';
-$db   = 'arby';
-$user = 'root';
-$pass = '123456';
+$host = 'HOST';
+$db   = 'DATABASE';
+$user = 'USER';
+$pass = 'PASSWORD';
 $charset = 'utf8mb4';
 
 $dsn = "mysql:host=$host;dbname=$db;charset=$charset";
