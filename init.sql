@@ -20,3 +20,23 @@ CREATE TABLE IF NOT EXISTS order_details (
     side VARCHAR(10) NOT NULL,
     FOREIGN KEY (id) REFERENCES orders(id)
 );
+
+CREATE TABLE IF NOT EXISTS opportunities (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    ts          TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    route_type  ENUM('direct', 'multi_leg') NOT NULL,
+    route_label VARCHAR(40) NOT NULL,
+    buy_exchange  VARCHAR(20) NOT NULL,
+    sell_exchange VARCHAR(20) NOT NULL,
+    spread_pct  DECIMAL(10, 6) NOT NULL,
+    buy_rate    DECIMAL(20, 8) NOT NULL,
+    sell_rate   DECIMAL(20, 8) NOT NULL,
+    cross_rate  DECIMAL(20, 8) DEFAULT NULL,
+    qty_a       DECIMAL(20, 8) NOT NULL,
+    qty_b       DECIMAL(20, 8) NOT NULL,
+    executed    BOOLEAN NOT NULL DEFAULT FALSE,
+    dry_run     BOOLEAN NOT NULL DEFAULT FALSE,
+    INDEX idx_ts (ts),
+    INDEX idx_route_label (route_label),
+    INDEX idx_spread (spread_pct)
+);

@@ -12,7 +12,8 @@ from bnnc import BINANCE
 from krkn import KRAKEN
 from binanceOrderBook import BINANCE_ORDER_BOOK
 from krakenOrderBook import KRAKEN_ORDER_BOOK
-from saveToDb import save_wallets, save_order, save_order_data
+from saveToDb import save_wallets, save_order, save_order_data, save_opportunity
+from api_server import init_api_state, start_api_server
 
 load_dotenv()
 
@@ -108,6 +109,11 @@ def _validate_env():
 order_book_lock = threading.Lock()
 wallets_lock = threading.Lock()
 data_lock = threading.Lock()
+comparisons_lock = threading.Lock()
+
+# --- Live comparison state (for API) ---
+latest_comparisons = {}
+bot_start_time = None
 
 # --- Exchanges ---
 exchanges = {
@@ -289,6 +295,20 @@ class MAIN2(threading.Thread):
                 if A != B
             ]
         best = max(info, key=lambda x: x["info"]["arbitrage"])
+
+        with comparisons_lock:
+            latest_comparisons[market] = {
+                "route_type": "direct",
+                "route_label": market,
+                "spread_pct": float(best["info"]["arbitrage"] * 100),
+                "buy_rate": float(best["info"]["A"]),
+                "sell_rate": float(best["info"]["B"]),
+                "buy_exchange": best["B"],
+                "sell_exchange": best["A"],
+                "cross_rate": None,
+                "ts": time(),
+            }
+
         ac = ", ".join([str(x) for x in self.arb_counter])
         logger.debug(
             "%s - %.5f%% A:%.8f B:%.8f best:%.8f%% [%s]",
@@ -306,6 +326,7 @@ class MAIN2(threading.Thread):
                 if DRY_RUN:
                     self._log_opportunity("direct", market, best)
                 else:
+                    self._log_opportunity("direct", market, best, executed=True)
                     self.trade(best)
                     logger.info(
                         "%s | buy: %.8f, sell: %.8f, r: %.8f",
@@ -337,6 +358,20 @@ class MAIN2(threading.Thread):
             ]
         best = max(info, key=lambda x: x["info"]["arbitrage"])
         route_label = "%s>%s" % (route["buy_market"], route["sell_market"])
+
+        with comparisons_lock:
+            latest_comparisons[route_label] = {
+                "route_type": "multi_leg",
+                "route_label": route_label,
+                "spread_pct": float(best["info"]["arbitrage"] * 100),
+                "buy_rate": float(best["info"]["A"]),
+                "sell_rate": float(best["info"]["B"]),
+                "buy_exchange": best["B"],
+                "sell_exchange": best["A"],
+                "cross_rate": float(best["info"]["cross_rate"]),
+                "ts": time(),
+            }
+
         logger.debug(
             "ML %s - %.5f%% A:%.8f B:%.8f cross:%.8f",
             route_label, best["info"]["arbitrage"] * 100,
@@ -355,6 +390,7 @@ class MAIN2(threading.Thread):
                 if DRY_RUN:
                     self._log_opportunity("multi_leg", route_label, best)
                 else:
+                    self._log_opportunity("multi_leg", route_label, best, executed=True)
                     self.trade_multi_leg(best)
                     logger.info(
                         "%s | buy: %.8f, sell: %.8f, cross: %.8f, r: %.8f",
@@ -369,15 +405,34 @@ class MAIN2(threading.Thread):
             if best["info"]["arbitrage"] > self.highest_arb:
                 self.highest_arb = best["info"]["arbitrage"]
 
-    def _log_opportunity(self, route_type, label, best):
+    def _log_opportunity(self, route_type, label, best, executed=False):
+        mode_tag = "EXECUTED" if executed else "DRY-RUN"
         logger.info(
-            "[DRY-RUN] OPPORTUNITY %s %s | sell_exchange=%s buy_exchange=%s "
+            "[%s] OPPORTUNITY %s %s | sell_exchange=%s buy_exchange=%s "
             "spread=%.5f%% sell_rate=%.8f buy_rate=%.8f qtyA=%.8f qtyB=%.8f",
-            route_type, label, best["A"], best["B"],
+            mode_tag, route_type, label, best["A"], best["B"],
             best["info"]["arbitrage"] * 100,
             best["info"]["A"], best["info"]["B"],
             best["info"]["qtyA"], best["info"]["qtyB"],
         )
+        cross_rate = best["info"].get("cross_rate")
+        try:
+            save_opportunity(
+                route_type=route_type,
+                route_label=label,
+                buy_exchange=best["B"],
+                sell_exchange=best["A"],
+                spread_pct=best["info"]["arbitrage"] * 100,
+                buy_rate=best["info"]["B"],
+                sell_rate=best["info"]["A"],
+                cross_rate=cross_rate if cross_rate and cross_rate != Decimal("0") else None,
+                qty_a=best["info"]["qtyA"],
+                qty_b=best["info"]["qtyB"],
+                executed=executed,
+                dry_run=DRY_RUN,
+            )
+        except Exception:
+            logger.exception("Failed to save opportunity to DB")
 
     def save_trade(self, market):
         order_id = save_order(market)
@@ -752,6 +807,7 @@ def print_wallets():
 
 if __name__ == "__main__":
     _validate_env()
+    bot_start_time = time()
 
     if DRY_RUN:
         logger.info("=" * 50)
@@ -785,6 +841,23 @@ if __name__ == "__main__":
     main.start()
     trade1.start()
     trade2.start()
+
+    # Start API server
+    init_api_state(
+        order_books=order_books,
+        wallets=wallets,
+        market_info=market_info,
+        routes=routes,
+        exchanges=exchanges,
+        order_book_lock=order_book_lock,
+        wallets_lock=wallets_lock,
+        comparisons_lock=comparisons_lock,
+        latest_comparisons=latest_comparisons,
+        dry_run=DRY_RUN,
+        bot_start_time=bot_start_time,
+        currencies=currencies,
+    )
+    start_api_server(port=8000)
 
     # Keep main thread alive
     try:

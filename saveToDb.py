@@ -57,3 +57,18 @@ def save_order_data(order_info, order_id):
             "INSERT INTO order_details (id, volume, rate, origId, exchange, side) VALUES (%s, %s, %s, %s, %s, %s)",
             (order_id, str(order["volume"]), str(order["rate"]), order["id"], exchange, side),
         )
+
+
+def save_opportunity(route_type, route_label, buy_exchange, sell_exchange,
+                     spread_pct, buy_rate, sell_rate, cross_rate,
+                     qty_a, qty_b, executed, dry_run):
+    mysql_query(
+        "INSERT INTO opportunities "
+        "(route_type, route_label, buy_exchange, sell_exchange, spread_pct, "
+        "buy_rate, sell_rate, cross_rate, qty_a, qty_b, executed, dry_run) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (route_type, route_label, buy_exchange, sell_exchange,
+         str(spread_pct), str(buy_rate), str(sell_rate),
+         str(cross_rate) if cross_rate is not None else None,
+         str(qty_a), str(qty_b), executed, dry_run),
+    )
