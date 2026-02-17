@@ -1,11 +1,12 @@
 import threading
-from time import time, sleep
+import logging
 import functools
-from twisted.internet import reactor
-from binance.client import Client
-from binance.websockets import BinanceSocketManager
+from time import time, sleep
 from decimal import Decimal
-import requests
+from binance import ThreadedWebsocketManager
+
+logger = logging.getLogger(__name__)
+
 
 class BINANCE_ORDER_BOOK(threading.Thread):
     def __init__(self, threadId, name, order_book, api_details):
@@ -13,61 +14,49 @@ class BINANCE_ORDER_BOOK(threading.Thread):
         self.threadId = threadId
         self.name = name
         self.order_book = order_book
-        self.process_functions = {pair : functools.partial(self.p_data, symbol=pair) for pair, _ in order_book.items()} 
         self.api_details = api_details
         self.reset_time = 108000
-        self.client = Client(self.api_details['API_KEY'], self.api_details['API_SECRET']) 
-        self.bm = BinanceSocketManager(self.client)
-        self.conn_keys = None
+        self.twm = None
 
     def run(self):
-        
         while True:
-            self.bm_init()
-            sleep(self.reset_time)
-            self.bm_reset()
-        
-    def convert_order_data(self, res):
-        conv_data = []
-        for r in res:
-            conv_data.append([Decimal(r[0]), Decimal(r[1])])
-        return conv_data
+            try:
+                self._start_ws()
+                sleep(self.reset_time)
+                self._stop_ws()
+            except Exception as e:
+                logger.error("Binance WS error: %s", e)
+                self._stop_ws()
+                sleep(5)
 
-    def p_data(self, msg, symbol=None):
-        self.order_book[symbol]['sell'] = self.convert_order_data(msg['asks'])
-        self.order_book[symbol]['buy'] = self.convert_order_data(msg['bids'])
-        self.order_book[symbol]['lastUpdate'] = time()
+    def _convert_order_data(self, res):
+        return [[Decimal(r[0]), Decimal(r[1])] for r in res]
 
-    def bm_init(self):
-        print("***START***")
-        self.client = Client(self.api_details['API_KEY'], self.api_details['API_SECRET'])
-        self.bm = BinanceSocketManager(self.client)
-        self.conn_keys = [self.bm.start_depth_socket(pair, f, depth=BinanceSocketManager.WEBSOCKET_DEPTH_20) for pair, f in self.process_functions.items()]
-        self.bm.start()
-        
+    def _process_message(self, msg, symbol=None):
+        if msg.get("e") == "error":
+            logger.error("Binance WS stream error: %s", msg)
+            return
+        if "asks" in msg and "bids" in msg:
+            self.order_book[symbol]["sell"] = self._convert_order_data(msg["asks"])
+            self.order_book[symbol]["buy"] = self._convert_order_data(msg["bids"])
+            self.order_book[symbol]["lastUpdate"] = time()
 
-    def bm_reset(self):
-        print("***STOP***")
-        self.bm.close()
-        self.bm = None
-        self.conn_keys = None
-        self.client = None
+    def _start_ws(self):
+        logger.info("Binance WS starting")
+        self.twm = ThreadedWebsocketManager(
+            api_key=self.api_details["API_KEY"],
+            api_secret=self.api_details["API_SECRET"],
+        )
+        self.twm.start()
+        for pair in self.order_book:
+            callback = functools.partial(self._process_message, symbol=pair)
+            self.twm.start_depth_socket(callback=callback, symbol=pair, depth=20)
 
-
-class BINANCE_ORDER_BOOK2(threading.Thread):
-    def __init__(self, threadId, name, order_book, api_details):
-        threading.Thread.__init__(self)
-        self.threadId = threadId
-        self.name = name
-        self.order_book = order_book
-        self.api_details = api_details
-
-    def run(self):
-        pass
-
-url = "wss://stream.binance.com:9443/ws/ethbtc@depth5"
-
-
-#order_books = {"binance" : {"ETHBTC" : {"sell" : None, "buy" : None}}}
-#bob = BINANCE_ORDER_BOOK(1, "BINANCE ORDER BOOK", order_books["binance"], binance_api_details)
-#bob.start()
+    def _stop_ws(self):
+        logger.info("Binance WS stopping")
+        if self.twm:
+            try:
+                self.twm.stop()
+            except Exception as e:
+                logger.warning("Error stopping Binance WS: %s", e)
+            self.twm = None

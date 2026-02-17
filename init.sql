@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS balances (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    currency VARCHAR(10) NOT NULL,
+    balance DECIMAL(20, 8) NOT NULL,
+    ts TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    ts TIMESTAMP NOT NULL,
+    market VARCHAR(20) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS order_details (
+    id INT NOT NULL,
+    volume DECIMAL(20, 8) NOT NULL,
+    rate DECIMAL(20, 8) NOT NULL,
+    origId VARCHAR(100) NOT NULL,
+    exchange VARCHAR(20) NOT NULL,
+    side VARCHAR(10) NOT NULL,
+    FOREIGN KEY (id) REFERENCES orders(id)
+);

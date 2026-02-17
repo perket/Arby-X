@@ -1,47 +1,59 @@
+import os
+import logging
 import pymysql
 
-hst = 'HOST' 
-prt = 3306
-usr = 'USER' 
-pwd = 'PASSWORD'
-dbe = 'DATABASE'
+logger = logging.getLogger(__name__)
 
-def connConnect():
-    return pymysql.connect(host=hst,port=prt,user=usr,passwd=pwd,db=dbe)
+DB_HOST = os.environ.get("DB_HOST", "localhost")
+DB_PORT = int(os.environ.get("DB_PORT", "3306"))
+DB_USER = os.environ.get("DB_USER", "")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
+DB_NAME = os.environ.get("DB_NAME", "")
 
-def mysql_query(*args):
-    q = args[0]
-    debug = True if len(args) < 2 else args[1]
+
+def conn_connect():
+    return pymysql.connect(host=DB_HOST, port=DB_PORT, user=DB_USER, passwd=DB_PASSWORD, db=DB_NAME)
+
+
+def mysql_query(query, params=None):
     response = None
-    conn = connConnect()
+    conn = conn_connect()
     cur = conn.cursor()
     try:
-        cur.execute(q)
+        cur.execute(query, params)
         response = cur.fetchall()
-        q_response_text = "Successfully executed: "+" ".join(q.split(" ")[:3])
-    except:
-        q_response_text = "Error while executing: "+" ".join(q.split(" ")[:3]) 
-        
-    if debug:
-        print(q_response_text)
+    except Exception as e:
+        logger.error("DB error executing query: %s | %s", query.split(" ")[:3], e)
 
     conn.commit()
     conn.close()
     return response
 
+
 def save_wallets(wallets):
     for curr, balance in wallets.items():
-        #print("insert into balances (currency, balance, ts) values ('{}',{},current_timestamp);".format(curr, balance))
-        mysql_query("insert into balances (currency, balance, ts) values ('{}',{},current_timestamp);".format(curr, balance))
-    
+        mysql_query(
+            "INSERT INTO balances (currency, balance, ts) VALUES (%s, %s, current_timestamp)",
+            (curr, str(balance)),
+        )
+
+
 def save_order(market):
-    mysql_query("insert into orders (ts,market) values (current_timestamp,'{}');".format(market))
-    order_id = mysql_query("select max(id) from orders;")[0][0]
-    return order_id
+    mysql_query(
+        "INSERT INTO orders (ts, market) VALUES (current_timestamp, %s)",
+        (market,),
+    )
+    result = mysql_query("SELECT max(id) FROM orders")
+    if result:
+        return result[0][0]
+    return None
+
 
 def save_order_data(order_info, order_id):
-    # "id" : order_id, "rate" : order_data["price"], "volume" : Decimal(order_data["quantity"]) - Decimal(order_data["quantityRemaining"])
-    exchange = order_info["exchange"]
-    side = order_info["side"]
-    for order in order_info["orderData"]:
-        mysql_query("insert into order_details (id, volume, rate, origId, exchange, side) values ({oid}, {volume}, {rate}, '{id}', '{e}', '{s}');".format(oid = order_id, s = side, e = exchange, **order))
+    exchange = order_info.get("exchange", "")
+    side = order_info.get("side", "")
+    for order in order_info.get("orderData", []):
+        mysql_query(
+            "INSERT INTO order_details (id, volume, rate, origId, exchange, side) VALUES (%s, %s, %s, %s, %s, %s)",
+            (order_id, str(order["volume"]), str(order["rate"]), order["id"], exchange, side),
+        )
