@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 import threading
 import logging
 from time import time, sleep
@@ -21,11 +22,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- CLI arguments ---
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Arby-X cryptocurrency arbitrage bot")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        default=os.environ.get("ARBY_DRY_RUN", "false").lower() in ("true", "1", "yes"),
+        help="Log opportunities without executing trades (also settable via ARBY_DRY_RUN env var)",
+    )
+    return parser.parse_args()
+
+_args = _parse_args()
+DRY_RUN = _args.dry_run
+
 # --- Configuration ---
 # 0 - Only base, 1 - Both base and trade, 2 - Trade only (all bases), 3 - Trade only (BTC exclusive)
-currencies = {"ETH": 2, "BTC": 0, "XLM": 2, "XRP": 2, "ADA": 2}
+currencies = {"ETH": 1, "BTC": 0, "XLM": 2, "XRP": 2, "ADA": 2}
 
 MIN_ARB = Decimal("0.005")
+MIN_ARB_MULTI_LEG = Decimal("0.008")
 MIN_VOLUME_DIFF = Decimal("2")
 MIN_VOLUME_MARGIN = Decimal("2")
 MAX_TIME_SINCE_UPDATE = Decimal("5")
@@ -36,6 +51,39 @@ markets = {
     for base, v in currencies.items()
     if (v < 2 and 0 < x < 3 and base != trade) or (x == 3 and v == 0)
 }
+
+
+def build_routes():
+    """Build list of direct and multi-leg arbitrage routes from available markets."""
+    routes = []
+    # Direct routes: same market across two exchanges (existing behavior)
+    for market in markets:
+        routes.append({"type": "direct", "market": market})
+    # Multi-leg routes: buy TRADE/BASE_A on one exchange, sell TRADE/BASE_B on another,
+    # using cross pair BASE_B/BASE_A (or BASE_A/BASE_B) to convert.
+    bases = [c for c, v in currencies.items() if v < 2]  # base currencies
+    trades = [c for c, v in currencies.items() if v >= 1 and v < 3]  # trade currencies
+    for trade in trades:
+        for base_a in bases:
+            for base_b in bases:
+                if base_a == base_b or trade == base_a or trade == base_b:
+                    continue
+                buy_market = trade + base_a
+                sell_market = trade + base_b
+                cross_pair = base_b + base_a  # e.g. ETHBTC when base_a=BTC, base_b=ETH
+                if buy_market in markets and sell_market in markets and cross_pair in markets:
+                    routes.append({
+                        "type": "multi_leg",
+                        "buy_market": buy_market,
+                        "sell_market": sell_market,
+                        "cross_pair": cross_pair,
+                        "trade": trade,
+                        "buy_base": base_a,
+                        "sell_base": base_b,
+                    })
+    return routes
+
+routes = build_routes()
 
 # --- API credentials ---
 binance_api_details = {
@@ -222,33 +270,42 @@ class MAIN2(threading.Thread):
             sleep(0.1)
 
     def compare(self):
-        for market in markets:
-            with order_book_lock:
-                info = [
-                    {
-                        "info": self.get_market_info(A, B, market),
-                        "A": A, "B": B, "market": market, "makeTrade": False,
-                    }
-                    for B in exchanges
-                    for A in exchanges
-                    if A != B
-                ]
-            best = max(info, key=lambda x: x["info"]["arbitrage"])
-            bold = "\033[1m" if best["info"]["arbitrage"] > 0 else "\033[0m"
-            ac = ", ".join([str(x) for x in self.arb_counter])
-            logger.debug(
-                "%s - %.5f%% A:%.8f B:%.8f best:%.8f%% [%s]",
-                market, best["info"]["arbitrage"] * 100,
-                best["info"]["A"], best["info"]["B"],
-                self.highest_arb * 100, ac,
-            )
-            if best["info"]["arbitrage"] >= MIN_ARB:
-                best = self.calc_rates(best)
-                best = self.calc_r(best)
-                with wallets_lock:
-                    best = self.calc_volumes(best)
-                if best["makeTrade"]:
-                    logger.info("TRADE OPPORTUNITY: %s arb=%.5f%%", market, best["info"]["arbitrage"] * 100)
+        for route in routes:
+            if route["type"] == "direct":
+                self._compare_direct(route)
+            else:
+                self._compare_multi_leg(route)
+
+    def _compare_direct(self, route):
+        market = route["market"]
+        with order_book_lock:
+            info = [
+                {
+                    "info": self.get_market_info(A, B, market),
+                    "A": A, "B": B, "market": market, "makeTrade": False,
+                }
+                for B in exchanges
+                for A in exchanges
+                if A != B
+            ]
+        best = max(info, key=lambda x: x["info"]["arbitrage"])
+        ac = ", ".join([str(x) for x in self.arb_counter])
+        logger.debug(
+            "%s - %.5f%% A:%.8f B:%.8f best:%.8f%% [%s]",
+            market, best["info"]["arbitrage"] * 100,
+            best["info"]["A"], best["info"]["B"],
+            self.highest_arb * 100, ac,
+        )
+        if best["info"]["arbitrage"] >= MIN_ARB:
+            best = self.calc_rates(best)
+            best = self.calc_r(best)
+            with wallets_lock:
+                best = self.calc_volumes(best)
+            if best["makeTrade"]:
+                logger.info("TRADE OPPORTUNITY: %s arb=%.5f%%", market, best["info"]["arbitrage"] * 100)
+                if DRY_RUN:
+                    self._log_opportunity("direct", market, best)
+                else:
                     self.trade(best)
                     logger.info(
                         "%s | buy: %.8f, sell: %.8f, r: %.8f",
@@ -259,14 +316,68 @@ class MAIN2(threading.Thread):
                     with data_lock:
                         self.data[0] = {}
                         self.data[1] = {}
-                if best["info"]["arbitrage"] > self.highest_arb:
-                    self.highest_arb = best["info"]["arbitrage"]
+            if best["info"]["arbitrage"] > self.highest_arb:
+                self.highest_arb = best["info"]["arbitrage"]
 
-            self.arb_counter[0] += 1 if best["info"]["arbitrage"] > Decimal("0.004") else 0
-            self.arb_counter[1] += 1 if best["info"]["arbitrage"] > Decimal("0.005") else 0
-            self.arb_counter[2] += 1 if best["info"]["arbitrage"] > Decimal("0.0075") else 0
-            self.arb_counter[3] += 1 if best["info"]["arbitrage"] > Decimal("0.01") else 0
-            sleep(0.1)
+        self.arb_counter[0] += 1 if best["info"]["arbitrage"] > Decimal("0.004") else 0
+        self.arb_counter[1] += 1 if best["info"]["arbitrage"] > Decimal("0.005") else 0
+        self.arb_counter[2] += 1 if best["info"]["arbitrage"] > Decimal("0.0075") else 0
+        self.arb_counter[3] += 1 if best["info"]["arbitrage"] > Decimal("0.01") else 0
+
+    def _compare_multi_leg(self, route):
+        with order_book_lock:
+            info = [
+                {
+                    "info": self.get_multi_leg_info(A, B, route),
+                    "A": A, "B": B, "route": route, "makeTrade": False,
+                }
+                for B in exchanges
+                for A in exchanges
+                if A != B
+            ]
+        best = max(info, key=lambda x: x["info"]["arbitrage"])
+        route_label = "%s>%s" % (route["buy_market"], route["sell_market"])
+        logger.debug(
+            "ML %s - %.5f%% A:%.8f B:%.8f cross:%.8f",
+            route_label, best["info"]["arbitrage"] * 100,
+            best["info"]["A"], best["info"]["B"], best["info"]["cross_rate"],
+        )
+        if best["info"]["arbitrage"] >= MIN_ARB_MULTI_LEG:
+            best = self.calc_rates_multi_leg(best)
+            best = self.calc_r_multi_leg(best)
+            with wallets_lock:
+                best = self.calc_volumes_multi_leg(best)
+            if best["makeTrade"]:
+                logger.info(
+                    "MULTI-LEG OPPORTUNITY: %s arb=%.5f%%",
+                    route_label, best["info"]["arbitrage"] * 100,
+                )
+                if DRY_RUN:
+                    self._log_opportunity("multi_leg", route_label, best)
+                else:
+                    self.trade_multi_leg(best)
+                    logger.info(
+                        "%s | buy: %.8f, sell: %.8f, cross: %.8f, r: %.8f",
+                        route_label, best["info"]["A"], best["info"]["B"],
+                        best["info"]["cross_rate"], best["info"]["r"],
+                    )
+                    self.update_wallets()
+                    self.save_trade(route_label)
+                    with data_lock:
+                        self.data[0] = {}
+                        self.data[1] = {}
+            if best["info"]["arbitrage"] > self.highest_arb:
+                self.highest_arb = best["info"]["arbitrage"]
+
+    def _log_opportunity(self, route_type, label, best):
+        logger.info(
+            "[DRY-RUN] OPPORTUNITY %s %s | sell_exchange=%s buy_exchange=%s "
+            "spread=%.5f%% sell_rate=%.8f buy_rate=%.8f qtyA=%.8f qtyB=%.8f",
+            route_type, label, best["A"], best["B"],
+            best["info"]["arbitrage"] * 100,
+            best["info"]["A"], best["info"]["B"],
+            best["info"]["qtyA"], best["info"]["qtyB"],
+        )
 
     def save_trade(self, market):
         order_id = save_order(market)
@@ -301,6 +412,64 @@ class MAIN2(threading.Thread):
             "arbitrage": buy_rate / sell_rate - 1,
             "A": buy_rate,
             "B": sell_rate,
+            "qtyA": Decimal("0"),
+            "qtyB": Decimal("0"),
+            "r": Decimal("0"),
+            "minOrderValueA": Decimal("0"),
+            "minOrderValueB": Decimal("0"),
+        }
+
+    def get_multi_leg_info(self, A, B, route):
+        """Get arbitrage info for a multi-leg route.
+
+        Buy trade/buy_base on exchange A, sell trade/sell_base on exchange B,
+        using cross pair to convert between bases.
+        """
+        zero = {
+            "arbitrage": Decimal("0"), "A": Decimal("0"), "B": Decimal("0"),
+            "cross_rate": Decimal("0"),
+            "qtyA": Decimal("0"), "qtyB": Decimal("0"), "r": Decimal("0"),
+            "minOrderValueA": Decimal("0"), "minOrderValueB": Decimal("0"),
+        }
+
+        buy_ob = order_books[A][route["buy_market"]]
+        sell_ob = order_books[B][route["sell_market"]]
+
+        if not buy_ob["buy"] or not sell_ob["sell"]:
+            return zero
+
+        # Cross rate: best bid from either exchange (selling sell_base for buy_base)
+        cross_rate = Decimal("0")
+        for ex in exchanges:
+            cp = order_books[ex][route["cross_pair"]]
+            if cp["buy"] and cp["buy"][0][0] > cross_rate:
+                cross_rate = cp["buy"][0][0]
+        if cross_rate == 0:
+            return zero
+
+        # Staleness checks
+        now = time()
+        for ob, label in [(buy_ob, "buy"), (sell_ob, "sell")]:
+            if ob["lastUpdate"] is not None and Decimal(str(now - ob["lastUpdate"])) > MAX_TIME_SINCE_UPDATE:
+                return zero
+        for ex in exchanges:
+            cp = order_books[ex][route["cross_pair"]]
+            if cp["lastUpdate"] is not None and Decimal(str(now - cp["lastUpdate"])) > MAX_TIME_SINCE_UPDATE:
+                return zero
+
+        buy_rate = buy_ob["buy"][0][0]   # best bid on buy market (revenue from selling)
+        sell_rate = sell_ob["sell"][0][0]  # best ask on sell market (cost of buying)
+
+        # Effective arb: revenue / cost - 1
+        # buy_rate is in buy_base; sell_rate is in sell_base
+        # cross_rate converts sell_base to buy_base (bid side of cross_pair)
+        arbitrage = buy_rate / (sell_rate * cross_rate) - 1
+
+        return {
+            "arbitrage": arbitrage,
+            "A": buy_rate,
+            "B": sell_rate,
+            "cross_rate": cross_rate,
             "qtyA": Decimal("0"),
             "qtyB": Decimal("0"),
             "r": Decimal("0"),
@@ -396,6 +565,138 @@ class MAIN2(threading.Thread):
             i += 1
         return volume * rate
 
+    def calc_rates_multi_leg(self, info):
+        route = info["route"]
+        buy_market = route["buy_market"]
+        sell_market = route["sell_market"]
+
+        mi_buy = market_info.get(info["A"], {}).get(buy_market)
+        mi_sell = market_info.get(info["B"], {}).get(sell_market)
+        if not mi_buy or not mi_sell:
+            return info
+
+        buy_fees = mi_buy["tradeFees"]
+        sell_fees = mi_sell["tradeFees"]
+
+        buy_rate = info["info"]["A"] / (1 + buy_fees)
+        sell_rate = info["info"]["B"] * (1 + sell_fees)
+        cross_rate = info["info"]["cross_rate"]
+
+        # Convert to common base via cross rate for diff calculation
+        effective_buy = buy_rate
+        effective_sell = sell_rate * cross_rate
+        diff = effective_buy - effective_sell
+
+        info["info"]["A"] = rnd_up(
+            (buy_rate - diff / 3) * (1 + buy_fees),
+            mi_buy["ratePrecision"],
+        )
+        info["info"]["B"] = rnd_down(
+            (sell_rate + diff / (3 * cross_rate)) / (1 + sell_fees),
+            mi_sell["ratePrecision"],
+        )
+        return info
+
+    def calc_r_multi_leg(self, info):
+        route = info["route"]
+        mi_buy = market_info.get(info["A"], {}).get(route["buy_market"])
+        mi_sell = market_info.get(info["B"], {}).get(route["sell_market"])
+        if not mi_buy or not mi_sell:
+            return info
+
+        buy_fees = mi_buy["tradeFees"]
+        sell_fees = mi_sell["tradeFees"]
+
+        buy_rate = info["info"]["A"] / (1 + buy_fees)
+        sell_rate = info["info"]["B"] * (1 + sell_fees)
+        cross_rate = info["info"]["cross_rate"]
+
+        # r = effective_sell / effective_buy
+        info["info"]["r"] = (sell_rate * cross_rate) / buy_rate
+        return info
+
+    def calc_volumes_multi_leg(self, info):
+        route = info["route"]
+        buy_exchange = info["A"]
+        sell_exchange = info["B"]
+        buy_market = route["buy_market"]
+        sell_market = route["sell_market"]
+        cross_rate = info["info"]["cross_rate"]
+
+        # Buy exchange needs buy_base currency; sell exchange needs trade currency
+        wallet_buy = wallets[buy_exchange].get(route["buy_base"], {}).get("available", Decimal("0"))
+        # Sell exchange wallet: trade currency valued in sell_base, convert to buy_base
+        wallet_sell_raw = wallets[sell_exchange].get(route["trade"], {}).get("available", Decimal("0")) * info["info"]["B"]
+        wallet_sell = wallet_sell_raw * cross_rate  # convert to buy_base for comparison
+
+        # Min order values (in buy_base terms)
+        mi_buy = market_info.get(buy_exchange, {}).get(buy_market)
+        mi_sell = market_info.get(sell_exchange, {}).get(sell_market)
+        if not mi_buy or not mi_sell:
+            return info
+
+        mov_buy = mi_buy.get("minOrderValueBTC", Decimal("0.0001"))
+        # For sell market min order value, convert to buy_base
+        mov_sell_raw = mi_sell.get("minOrderValueBTC", Decimal("0.0001"))
+        if route["sell_base"] == "ETH":
+            mov_sell_raw = mi_sell.get("minOrderValueETH") or (mov_sell_raw / cross_rate if cross_rate else Decimal("1e99"))
+        mov_sell = mov_sell_raw * cross_rate if route["sell_base"] != route["buy_base"] else mov_sell_raw
+
+        info["info"]["minOrderValueA"] = mov_buy or Decimal("0.0001")
+        info["info"]["minOrderValueB"] = mov_sell or Decimal("0.0001")
+
+        obv_buy = self.get_order_book_value(info["info"]["A"], "buy", buy_exchange, buy_market) / 3
+        obv_sell = self.get_order_book_value(info["info"]["B"], "sell", sell_exchange, sell_market) / 3
+        obv_sell_converted = obv_sell * cross_rate  # convert to buy_base
+
+        min_val = min(obv_buy, obv_sell_converted, wallet_buy, wallet_sell)
+        max_min_order = max(info["info"]["minOrderValueA"], info["info"]["minOrderValueB"])
+
+        if min_val > max_min_order * Decimal("1.25"):
+            order_size = min_val
+            precision_A = mi_buy["volumePrecision"]
+            precision_B = mi_sell["volumePrecision"]
+
+            # qtyA is volume on buy_market (in trade currency), qtyB on sell_market
+            if precision_A < precision_B:
+                info["info"]["qtyA"] = rnd_down(
+                    info["info"]["r"] * order_size / (info["info"]["B"] * cross_rate * (1 + mi_sell["tradeFees"])),
+                    precision_A,
+                )
+                info["info"]["qtyB"] = rnd_down(info["info"]["qtyA"] / info["info"]["r"], precision_B)
+            else:
+                info["info"]["qtyB"] = rnd_down(
+                    order_size / (info["info"]["B"] * cross_rate * (1 + mi_sell["tradeFees"])),
+                    precision_B,
+                )
+                info["info"]["qtyA"] = rnd_down(info["info"]["r"] * info["info"]["qtyB"], precision_A)
+            info["makeTrade"] = True
+        return info
+
+    def trade_multi_leg(self, info):
+        route = info["route"]
+        with data_lock:
+            self.data[0] = {
+                "side": "SELL", "exchange": info["A"],
+                "rate": info["info"]["A"], "volume": info["info"]["qtyA"],
+                "market": route["buy_market"], "minOrderValue": info["info"]["minOrderValueA"],
+                "orderData": [],
+            }
+            self.data[1] = {
+                "side": "BUY", "exchange": info["B"],
+                "rate": info["info"]["B"], "volume": info["info"]["qtyB"],
+                "market": route["sell_market"], "minOrderValue": info["info"]["minOrderValueB"],
+                "orderData": [],
+            }
+        self.eventFlags[0].set()
+        if not self.eventFlags[1].wait(timeout=60):
+            logger.error("TRADE 1 timed out (multi-leg)")
+        if not self.eventFlags[2].wait(timeout=60):
+            logger.error("TRADE 2 timed out (multi-leg)")
+
+        self.eventFlags[1].clear()
+        self.eventFlags[2].clear()
+
     def trade(self, info):
         with data_lock:
             self.data[0] = {
@@ -451,6 +752,15 @@ def print_wallets():
 
 if __name__ == "__main__":
     _validate_env()
+
+    if DRY_RUN:
+        logger.info("=" * 50)
+        logger.info("DRY-RUN MODE — no trades will be executed")
+        logger.info("=" * 50)
+
+    direct_count = sum(1 for r in routes if r["type"] == "direct")
+    ml_count = sum(1 for r in routes if r["type"] == "multi_leg")
+    logger.info("Routes: %d direct + %d multi-leg = %d total", direct_count, ml_count, len(routes))
 
     logger.info("Initializing market info...")
     init_market_info()

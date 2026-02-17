@@ -30,6 +30,18 @@ cp .env.example .env  # fill in API keys and DB credentials, set DB_HOST=localho
 python3 arby.py
 ```
 
+#### Dry-run mode
+
+To observe opportunities without executing trades:
+
+```bash
+python3 arby.py --dry-run
+# Or via environment variable:
+ARBY_DRY_RUN=true python3 arby.py
+# Or in Docker:
+docker compose run -e ARBY_DRY_RUN=true bot
+```
+
 Dependencies (pinned in `requirements.txt`): `python-binance`, `requests`, `pymysql`, `websocket-client`, `python-dotenv`.
 
 ## Testing
@@ -46,13 +58,13 @@ The system uses a multi-threaded, event-driven architecture with 5 concurrent th
 
 1. **BINANCE_ORDER_BOOK** (`binanceOrderBook.py`) — Collects Binance order book data via WebSocket using `ThreadedWebsocketManager` from `python-binance`. Resets periodically every 108,000 seconds.
 2. **KRAKEN_ORDER_BOOK** (`krakenOrderBook.py`) — Collects Kraken order book data via WebSocket (`wss://ws.kraken.com/v2`), subscribes to `book` channel with depth 10. Reconnects with exponential backoff.
-3. **MAIN2** (`arby.py`) — Comparison engine that runs every 0.1s, detecting arbitrage opportunities exceeding `MIN_ARB` (0.5%).
+3. **MAIN2** (`arby.py`) — Comparison engine that runs every 0.1s, detecting arbitrage opportunities exceeding `MIN_ARB` (0.5% for direct routes) or `MIN_ARB_MULTI_LEG` (0.8% for multi-leg routes).
 4. **TRADE thread 1** (`arby.py`) — Executes SELL leg of arbitrage trades.
 5. **TRADE thread 2** (`arby.py`) — Executes BUY leg of arbitrage trades.
 
 ### Key modules
 
-- **arby.py** — Entry point and orchestrator. Contains `TRADE` and `MAIN2` classes, thread initialization, arbitrage calculation (`calc_rates`, `calc_r`, `calc_volumes`), and wallet management. Uses `if __name__ == "__main__":` guard. All threads are daemon threads.
+- **arby.py** — Entry point and orchestrator. Contains `TRADE` and `MAIN2` classes, thread initialization, arbitrage calculation (`calc_rates`, `calc_r`, `calc_volumes`), and wallet management. Supports both direct routes (same pair across exchanges) and multi-leg routes (different base pairs with cross-rate conversion, e.g. buy XLM/BTC + sell XLM/ETH using ETH/BTC cross rate). The `build_routes()` function generates all route combinations at startup. Uses `if __name__ == "__main__":` guard. All threads are daemon threads.
 - **bnnc.py** — Binance API wrapper (`BINANCE` class). HMAC-SHA256 auth, order placement, balance queries, market info/filters. Uses `/api/v3/` endpoints.
 - **krkn.py** — Kraken API wrapper (`KRAKEN` class). HMAC-SHA512 auth, order placement, balance queries. Handles BTC↔XBT symbol mapping. Rate-limited (~1s between private calls).
 - **saveToDb.py** — MySQL persistence layer using PyMySQL with parameterized queries. DB credentials loaded from environment variables.
@@ -72,5 +84,6 @@ Order book threads continuously update a shared `order_books` dict → MAIN2 com
 
 - All financial arithmetic uses `decimal.Decimal` with `quantize()` for proper rounding (ROUND_DOWN, ROUND_UP, ROUND_HALF_UP).
 - All credentials (API keys, DB) are loaded from environment variables via `python-dotenv` (`.env` file).
-- Configuration constants (`MIN_ARB`, `MIN_VOLUME_DIFF`, `MAX_TIME_SINCE_UPDATE`, `currencies` dict) are defined at the top of `arby.py`.
+- Configuration constants (`MIN_ARB`, `MIN_ARB_MULTI_LEG`, `MIN_VOLUME_DIFF`, `MAX_TIME_SINCE_UPDATE`, `currencies` dict) are defined at the top of `arby.py`.
+- `--dry-run` flag (or `ARBY_DRY_RUN` env var) enables observation mode — opportunities are logged but no trades are executed.
 - Logging is used throughout instead of print statements.
