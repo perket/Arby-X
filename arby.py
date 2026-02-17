@@ -818,6 +818,23 @@ if __name__ == "__main__":
     ml_count = sum(1 for r in routes if r["type"] == "multi_leg")
     logger.info("Routes: %d direct + %d multi-leg = %d total", direct_count, ml_count, len(routes))
 
+    # Start API server early so the dashboard is always reachable
+    init_api_state(
+        order_books=order_books,
+        wallets=wallets,
+        market_info=market_info,
+        routes=routes,
+        exchanges=exchanges,
+        order_book_lock=order_book_lock,
+        wallets_lock=wallets_lock,
+        comparisons_lock=comparisons_lock,
+        latest_comparisons=latest_comparisons,
+        dry_run=DRY_RUN,
+        bot_start_time=bot_start_time,
+        currencies=currencies,
+    )
+    start_api_server(port=8000)
+
     logger.info("Initializing market info...")
     init_market_info()
     logger.info("Initializing wallets...")
@@ -841,23 +858,6 @@ if __name__ == "__main__":
     main.start()
     trade1.start()
     trade2.start()
-
-    # Start API server
-    init_api_state(
-        order_books=order_books,
-        wallets=wallets,
-        market_info=market_info,
-        routes=routes,
-        exchanges=exchanges,
-        order_book_lock=order_book_lock,
-        wallets_lock=wallets_lock,
-        comparisons_lock=comparisons_lock,
-        latest_comparisons=latest_comparisons,
-        dry_run=DRY_RUN,
-        bot_start_time=bot_start_time,
-        currencies=currencies,
-    )
-    start_api_server(port=8000)
 
     # Keep main thread alive
     try:
