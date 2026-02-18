@@ -63,10 +63,19 @@ def start_api_server(port=8000):
 
 # ---------- Endpoints ----------
 
+def _get_routes():
+    """Get live routes list from arby module, falling back to _state snapshot."""
+    try:
+        import arby
+        return arby.routes
+    except (ImportError, AttributeError):
+        return _state.get("routes", [])
+
+
 @app.get("/api/status")
 def get_status():
     uptime = time() - _state.get("bot_start_time", time())
-    routes = _state.get("routes", [])
+    routes = _get_routes()
     direct = sum(1 for r in routes if r["type"] == "direct")
     multi_leg = sum(1 for r in routes if r["type"] == "multi_leg")
     cross = sum(1 for r in routes if r["type"] == "cross")
@@ -301,7 +310,7 @@ def get_config():
     return {
         "mode": "dry-run" if _state.get("dry_run") else "live",
         "uptime_seconds": round(time() - _state.get("bot_start_time", time()), 1),
-        "routes_count": len(_state.get("routes", [])),
+        "routes_count": len(_get_routes()),
         "min_profit": float(os.environ.get("ARBY_MIN_PROFIT", "0.001")),
         "keys": {
             "BINANCE_API_KEY": mask("BINANCE_API_KEY"),
@@ -379,12 +388,16 @@ def discover_currencies():
 @app.get("/api/currencies")
 def get_currencies():
     """Return current selected currencies, auto-assigned roles, and generated markets."""
+    import arby
     currencies = _state.get("currencies", {})
     markets = _state.get("markets", {})
+    all_bases = sorted([c for c, v in currencies.items() if v < 2])
     return {
         "selected": _state.get("selected_currencies", []),
         "roles": currencies,
         "markets": {k: v for k, v in markets.items()},
+        "currency_bases": dict(arby.currency_bases),
+        "all_bases": all_bases,
     }
 
 
@@ -427,4 +440,82 @@ def update_currencies(body: CurrencyUpdateBody):
     return {
         "currencies": body.currencies,
         "message": "Restart required for changes to take effect",
+    }
+
+
+@app.get("/api/currencies/bases")
+def get_currency_bases():
+    """Return per-currency base config and available bases."""
+    import arby
+    currencies = _state.get("currencies", {})
+    all_bases = sorted([c for c, v in currencies.items() if v < 2])
+    return {
+        "currency_bases": dict(arby.currency_bases),
+        "all_bases": all_bases,
+    }
+
+
+class CurrencyBasesUpdateBody(BaseModel):
+    currency_bases: dict[str, list[str]]
+
+
+@app.put("/api/currencies/bases")
+def update_currency_bases(body: CurrencyBasesUpdateBody):
+    """Save per-currency base overrides to .env and hot-reload routes."""
+    import arby
+
+    # Validate against known currencies
+    currencies = _state.get("currencies", {})
+    known_trades = {c for c, v in currencies.items() if v >= 1}
+    known_bases = {c for c, v in currencies.items() if v < 2}
+    for currency, bases in body.currency_bases.items():
+        if currency.upper() not in known_trades:
+            return JSONResponse(
+                {"error": f"Unknown trade currency: {currency}"}, status_code=400
+            )
+        for b in bases:
+            if b.upper() not in known_bases:
+                return JSONResponse(
+                    {"error": f"Unknown base currency: {b}"}, status_code=400
+                )
+            if any(ch in b for ch in ("\n", "\r", ";", ":")):
+                return JSONResponse(
+                    {"error": f"Invalid character in base name: {b}"}, status_code=400
+                )
+
+    # Serialize to env var format: "XLM:BTC,ETH;XRP:BTC"
+    parts = []
+    for currency, bases in sorted(body.currency_bases.items()):
+        if bases:
+            parts.append(f"{currency.upper()}:{','.join(b.upper() for b in bases)}")
+    new_value = ";".join(parts)
+
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+
+    found = False
+    new_lines = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if key == "ARBY_CURRENCY_BASES":
+            new_lines.append(f"ARBY_CURRENCY_BASES={new_value}\n")
+            found = True
+        else:
+            new_lines.append(line)
+
+    if not found:
+        new_lines.append(f"ARBY_CURRENCY_BASES={new_value}\n")
+
+    with open(env_path, "w") as f:
+        f.writelines(new_lines)
+
+    route_count = arby.reload_routes()
+
+    return {
+        "currency_bases": body.currency_bases,
+        "route_count": route_count,
+        "message": f"Routes reloaded: {route_count} active routes",
     }

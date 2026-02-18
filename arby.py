@@ -38,7 +38,7 @@ DRY_RUN = _args.dry_run
 
 # --- Configuration ---
 # Role codes:
-# 0 - Only base, 1 - Both base and trade, 2 - Trade only (all bases), 3 - Trade only (BTC exclusive)
+# 0 - Only base, 1 - Both base and trade, 2 - Trade only (with configurable available_bases)
 _DEFAULT_CURRENCIES = ["ETH", "BTC", "XLM", "XRP", "ADA"]
 
 
@@ -77,12 +77,7 @@ def auto_assign_roles(selected, common_pairs):
         elif is_quote and not is_base_asset:
             roles[c] = 0  # only base (e.g. BTC)
         elif is_base_asset and not is_quote:
-            # Check if paired with multiple base currencies or just BTC
-            bases_for_c = {q for b, q in relevant if b == c}
-            if len(bases_for_c) > 1:
-                roles[c] = 2  # trade, all bases
-            else:
-                roles[c] = 3  # trade, BTC only
+            roles[c] = 2  # trade
         else:
             # Not in any common pair — skip
             roles[c] = 2  # default to trade
@@ -105,24 +100,64 @@ MIN_VOLUME_DIFF = Decimal("2")
 MIN_VOLUME_MARGIN = Decimal("2")
 MAX_TIME_SINCE_UPDATE = Decimal("5")
 
+
+def _load_currency_bases():
+    """Parse ARBY_CURRENCY_BASES env var into per-currency base overrides.
+
+    Format: "XLM:BTC,ETH;XRP:BTC" → {"XLM": ["BTC", "ETH"], "XRP": ["BTC"]}
+    If empty/missing, returns empty dict (= no overrides, use all bases).
+    """
+    raw = os.environ.get("ARBY_CURRENCY_BASES", "")
+    if not raw.strip():
+        return {}
+    result = {}
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if ":" not in entry:
+            continue
+        currency, bases_str = entry.split(":", 1)
+        currency = currency.strip().upper()
+        bases = [b.strip().upper() for b in bases_str.split(",") if b.strip()]
+        if currency and bases:
+            result[currency] = bases
+    return result
+
+
+currency_bases = _load_currency_bases()
+
 markets = {
     trade + base: {"base": base, "trade": trade}
     for trade, x in currencies.items()
     for base, v in currencies.items()
-    if (v < 2 and 0 < x < 3 and base != trade) or (x == 3 and v == 0)
+    if v < 2 and x >= 1 and base != trade
 }
+
+
+def _build_active_markets():
+    """Return subset of markets filtered by currency_bases overrides.
+
+    If currency_bases has an entry for a trade currency, only include markets
+    where the base is in the allowed list. Otherwise include all.
+    """
+    if not currency_bases:
+        return dict(markets)
+    return {
+        k: v for k, v in markets.items()
+        if v["trade"] not in currency_bases or v["base"] in currency_bases[v["trade"]]
+    }
 
 
 def build_routes():
     """Build list of direct and multi-leg arbitrage routes from available markets."""
+    active = _build_active_markets()
     routes = []
     # Direct routes: same market across two exchanges (existing behavior)
-    for market in markets:
+    for market in active:
         routes.append({"type": "direct", "market": market})
     # Multi-leg routes: buy TRADE/BASE_A on one exchange, sell TRADE/BASE_B on another,
     # using cross pair BASE_B/BASE_A (or BASE_A/BASE_B) to convert.
     bases = [c for c, v in currencies.items() if v < 2]  # base currencies
-    trades = [c for c, v in currencies.items() if v >= 1 and v < 3]  # trade currencies
+    trades = [c for c, v in currencies.items() if v >= 1]  # trade currencies
     for trade in trades:
         for base_a in bases:
             for base_b in bases:
@@ -131,7 +166,7 @@ def build_routes():
                 buy_market = trade + base_a
                 sell_market = trade + base_b
                 cross_pair = base_b + base_a  # e.g. ETHBTC when base_a=BTC, base_b=ETH
-                if buy_market in markets and sell_market in markets and cross_pair in markets:
+                if buy_market in active and sell_market in active and cross_pair in active:
                     routes.append({
                         "type": "multi_leg",
                         "buy_market": buy_market,
@@ -152,7 +187,7 @@ def build_routes():
                     continue
                 market_x = trade_x + base
                 market_y = trade_y + base
-                if market_x in markets and market_y in markets:
+                if market_x in active and market_y in active:
                     routes.append({
                         "type": "cross",
                         "trade_x": trade_x,
@@ -164,6 +199,23 @@ def build_routes():
     return routes
 
 routes = build_routes()
+
+
+def reload_routes():
+    """Hot-reload routes by re-reading currency_bases from env and rebuilding routes."""
+    global currency_bases, routes
+    from dotenv import dotenv_values
+    env_file = os.path.join(os.path.dirname(__file__), ".env")
+    new_val = dotenv_values(env_file).get("ARBY_CURRENCY_BASES", "")
+    os.environ["ARBY_CURRENCY_BASES"] = new_val
+    new_currency_bases = _load_currency_bases()
+    # Build routes with new bases (temporarily set global for build_routes to read)
+    with routes_lock:
+        currency_bases = new_currency_bases
+        routes = build_routes()
+    logger.info("Routes reloaded: %d routes, currency_bases=%s", len(routes), currency_bases)
+    return len(routes)
+
 
 # --- API credentials ---
 binance_api_details = {
@@ -189,6 +241,7 @@ order_book_lock = threading.Lock()
 wallets_lock = threading.Lock()
 data_lock = threading.Lock()
 comparisons_lock = threading.Lock()
+routes_lock = threading.Lock()
 
 # --- Live comparison state (for API) ---
 latest_comparisons = {}
@@ -441,7 +494,9 @@ class MAIN2(threading.Thread):
             sleep(0.1)
 
     def compare(self):
-        for route in routes:
+        with routes_lock:
+            current_routes = list(routes)
+        for route in current_routes:
             if route["type"] == "direct":
                 self._compare_direct(route)
             elif route["type"] == "multi_leg":

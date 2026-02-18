@@ -12,8 +12,7 @@ const KEY_LABELS: Record<string, string> = {
 const ROLE_LABELS: Record<number, string> = {
   0: "Base only",
   1: "Base + Trade",
-  2: "Trade (all bases)",
-  3: "Trade (BTC only)",
+  2: "Trade",
 };
 
 function estimateRoles(
@@ -32,8 +31,7 @@ function estimateRoles(
     if (isQ && isB) roles[c] = 1;
     else if (isQ) roles[c] = 0;
     else if (isB) {
-      const bases = relevant.filter(([b]) => b === c).map(([, q]) => q);
-      roles[c] = bases.length > 1 ? 2 : 3;
+      roles[c] = 2;
     } else {
       roles[c] = 2;
     }
@@ -50,6 +48,9 @@ export default function SettingsPage() {
   const [selectedCurrencies, setSelectedCurrencies] = useState<string[] | null>(null);
   const [currSaving, setCurrSaving] = useState(false);
   const [currMessage, setCurrMessage] = useState("");
+  const [baseEdits, setBaseEdits] = useState<Record<string, string[]> | null>(null);
+  const [baseSaving, setBaseSaving] = useState(false);
+  const [baseMessage, setBaseMessage] = useState("");
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -212,6 +213,105 @@ export default function SettingsPage() {
             </div>
           </div>
         )}
+
+        {/* Base Pairing */}
+        {currConfig && currConfig.all_bases && currConfig.all_bases.length > 0 && (() => {
+          const tradeCurrencies = currConfig.selected.filter(
+            (c) => currConfig.roles[c] >= 2,
+          );
+          if (tradeCurrencies.length === 0) return null;
+          const currentBases = baseEdits ?? currConfig.currency_bases ?? {};
+          return (
+            <div className="space-y-3 border-t border-gray-700 pt-4">
+              <h3 className="text-xs text-gray-400 uppercase tracking-wider">
+                Base Pairing
+              </h3>
+              <div className="text-xs text-gray-500 mb-2">
+                Select which base currencies each trade currency pairs with.
+                Unchecking all keeps the default (all bases).
+              </div>
+              {tradeCurrencies.map((tc) => {
+                const allowed = currentBases[tc] ?? [];
+                const allChecked = allowed.length === 0;
+                return (
+                  <div key={tc} className="flex items-center gap-3 text-sm">
+                    <span className="text-white font-mono w-10">{tc}</span>
+                    {currConfig.all_bases.map((base) => {
+                      const checked = allChecked || allowed.includes(base);
+                      return (
+                        <label
+                          key={base}
+                          className={`flex items-center gap-1 text-xs cursor-pointer ${
+                            checked ? "text-white" : "text-gray-500"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              const prev = { ...(baseEdits ?? currConfig.currency_bases ?? {}) };
+                              const prevAllowed = prev[tc] ?? [];
+                              const wasAllDefault = prevAllowed.length === 0;
+                              let newAllowed: string[];
+                              if (wasAllDefault) {
+                                // Switching from "all" → uncheck this one base
+                                newAllowed = currConfig.all_bases.filter((b) => b !== base);
+                              } else if (checked) {
+                                newAllowed = prevAllowed.filter((b) => b !== base);
+                              } else {
+                                newAllowed = [...prevAllowed, base].sort();
+                              }
+                              // If all bases selected, clear to empty (= default all)
+                              if (newAllowed.length >= currConfig.all_bases.length) {
+                                newAllowed = [];
+                              }
+                              const next = { ...prev, [tc]: newAllowed };
+                              // Remove entries with empty arrays (= default)
+                              const cleaned: Record<string, string[]> = {};
+                              for (const [k, v] of Object.entries(next)) {
+                                if (v.length > 0) cleaned[k] = v;
+                              }
+                              setBaseEdits(cleaned);
+                            }}
+                            className="accent-accent-blue"
+                          />
+                          {base}
+                        </label>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+              <div className="flex items-center gap-3 pt-1">
+                <button
+                  onClick={async () => {
+                    setBaseSaving(true);
+                    setBaseMessage("");
+                    try {
+                      const res = await api.put("/api/currencies/bases", {
+                        currency_bases: baseEdits ?? {},
+                      });
+                      setBaseMessage(res.data.message || "Saved");
+                      setBaseEdits(null);
+                      refetchCurr();
+                    } catch {
+                      setBaseMessage("Failed to save");
+                    } finally {
+                      setBaseSaving(false);
+                    }
+                  }}
+                  disabled={baseSaving || baseEdits === null}
+                  className="px-4 py-2 bg-accent-blue text-white rounded text-sm font-medium hover:bg-accent-blue/80 disabled:opacity-30 transition-colors"
+                >
+                  {baseSaving ? "Saving..." : "Save Base Config"}
+                </button>
+                {baseMessage && (
+                  <span className="text-sm text-accent-green">{baseMessage}</span>
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Discover button */}
         <button

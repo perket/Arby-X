@@ -111,4 +111,6 @@ export interface CurrencyConfig {
   selected: string[];
   roles: Record<string, number>;
   markets: Record<string, { base: string; trade: string }>;
+  currency_bases: Record<string, string[]>;
+  all_bases: string[];
 }
