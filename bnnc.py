@@ -9,6 +9,18 @@ logger = logging.getLogger(__name__)
 
 
 class BINANCE:
+    @staticmethod
+    def discover_pairs():
+        """Query Binance exchangeInfo and return set of (baseAsset, quoteAsset) for active pairs."""
+        res = requests.get("https://api.binance.com/api/v3/exchangeInfo", timeout=15)
+        res.raise_for_status()
+        data = res.json()
+        return {
+            (s["baseAsset"], s["quoteAsset"])
+            for s in data.get("symbols", [])
+            if s.get("status") == "TRADING"
+        }
+
     def __init__(self, api_details, currencies):
         self.api_details = api_details
         self.currencies = currencies

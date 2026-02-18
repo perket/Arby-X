@@ -99,3 +99,15 @@ export interface ConfigResponse {
   routes_count: number;
   keys: Record<string, string>;
 }
+
+export interface CurrencyDiscovery {
+  available_currencies: string[];
+  common_pairs: [string, string][];
+  selected_currencies: string[];
+}
+
+export interface CurrencyConfig {
+  selected: string[];
+  roles: Record<string, number>;
+  markets: Record<string, { base: string; trade: string }>;
+}

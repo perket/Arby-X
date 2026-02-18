@@ -27,6 +27,22 @@ def from_kraken_asset(asset):
 
 
 class KRAKEN:
+    @staticmethod
+    def discover_pairs():
+        """Query Kraken AssetPairs and return set of (base, quote) in normalized names."""
+        res = requests.get("https://api.kraken.com/0/public/AssetPairs", timeout=15)
+        res.raise_for_status()
+        data = res.json()
+        pairs = set()
+        for pair_name, pair_data in data.get("result", {}).items():
+            if pair_name.endswith(".d"):
+                continue
+            base = from_kraken_asset(pair_data.get("base", ""))
+            quote = from_kraken_asset(pair_data.get("quote", ""))
+            if base and quote:
+                pairs.add((base, quote))
+        return pairs
+
     def __init__(self, api_details, currencies):
         self.api_key = api_details["API_KEY"]
         self.api_secret = api_details["API_SECRET"]

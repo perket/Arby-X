@@ -37,8 +37,68 @@ _args = _parse_args()
 DRY_RUN = _args.dry_run
 
 # --- Configuration ---
+# Role codes:
 # 0 - Only base, 1 - Both base and trade, 2 - Trade only (all bases), 3 - Trade only (BTC exclusive)
-currencies = {"ETH": 1, "BTC": 0, "XLM": 2, "XRP": 2, "ADA": 2}
+_DEFAULT_CURRENCIES = ["ETH", "BTC", "XLM", "XRP", "ADA"]
+
+
+def _load_currencies():
+    """Load selected currencies from ARBY_CURRENCIES env var, fallback to defaults."""
+    raw = os.environ.get("ARBY_CURRENCIES", "")
+    if raw.strip():
+        return [c.strip().upper() for c in raw.split(",") if c.strip()]
+    return list(_DEFAULT_CURRENCIES)
+
+
+def _discover_common_pairs():
+    """Query both exchanges and return intersection of available pairs."""
+    binance_pairs = BINANCE.discover_pairs()
+    kraken_pairs = KRAKEN.discover_pairs()
+    return binance_pairs & kraken_pairs
+
+
+def auto_assign_roles(selected, common_pairs):
+    """Auto-assign role codes based on which common pairs each currency appears in.
+
+    Returns dict like {"ETH": 1, "BTC": 0, "XLM": 2, ...}
+    """
+    # Filter common_pairs to only those involving selected currencies
+    relevant = {(b, q) for b, q in common_pairs if b in selected and q in selected}
+    # Determine which currencies appear as base (quote) and as trade (base asset)
+    appears_as_quote = {q for _, q in relevant}
+    appears_as_base = {b for b, _ in relevant}
+
+    roles = {}
+    for c in selected:
+        is_quote = c in appears_as_quote
+        is_base_asset = c in appears_as_base
+        if is_quote and is_base_asset:
+            roles[c] = 1  # both base and trade (e.g. ETH)
+        elif is_quote and not is_base_asset:
+            roles[c] = 0  # only base (e.g. BTC)
+        elif is_base_asset and not is_quote:
+            # Check if paired with multiple base currencies or just BTC
+            bases_for_c = {q for b, q in relevant if b == c}
+            if len(bases_for_c) > 1:
+                roles[c] = 2  # trade, all bases
+            else:
+                roles[c] = 3  # trade, BTC only
+        else:
+            # Not in any common pair — skip
+            roles[c] = 2  # default to trade
+    return roles
+
+
+# Load currencies with auto-role assignment, fallback to hardcoded defaults
+selected_currencies = _load_currencies()
+try:
+    _common_pairs = _discover_common_pairs()
+    currencies = auto_assign_roles(selected_currencies, _common_pairs)
+    logger.info("Auto-assigned currency roles: %s", currencies)
+except Exception as e:
+    logger.warning("Could not discover exchange pairs (%s), using hardcoded defaults", e)
+    _hardcoded = {"ETH": 1, "BTC": 0, "XLM": 2, "XRP": 2, "ADA": 2}
+    currencies = {c: _hardcoded.get(c, 2) for c in selected_currencies}
 
 MIN_ARB = Decimal("0.005")
 MIN_ARB_MULTI_LEG = Decimal("0.008")
@@ -832,6 +892,8 @@ if __name__ == "__main__":
         dry_run=DRY_RUN,
         bot_start_time=bot_start_time,
         currencies=currencies,
+        selected_currencies=selected_currencies,
+        markets=markets,
     )
     start_api_server(port=8000)
 

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import uvicorn
 
 from saveToDb import mysql_query
@@ -31,7 +32,8 @@ def _decimal_to_float(obj):
 
 def init_api_state(*, order_books, wallets, market_info, routes, exchanges,
                    order_book_lock, wallets_lock, comparisons_lock,
-                   latest_comparisons, dry_run, bot_start_time, currencies):
+                   latest_comparisons, dry_run, bot_start_time, currencies,
+                   selected_currencies=None, markets=None):
     _state.update({
         "order_books": order_books,
         "wallets": wallets,
@@ -45,6 +47,8 @@ def init_api_state(*, order_books, wallets, market_info, routes, exchanges,
         "dry_run": dry_run,
         "bot_start_time": bot_start_time,
         "currencies": currencies,
+        "selected_currencies": selected_currencies or list(currencies.keys()),
+        "markets": markets or {},
     })
 
 
@@ -340,3 +344,85 @@ def update_config(body: dict):
         f.writelines(new_lines)
 
     return {"updated": list(updates.keys()), "message": "Restart required for changes to take effect"}
+
+
+# ---------- Currency Management ----------
+
+@app.get("/api/currencies/discover")
+def discover_currencies():
+    """Query both exchanges, intersect pairs, return available currencies and common pairs."""
+    from bnnc import BINANCE
+    from krkn import KRAKEN
+
+    try:
+        binance_pairs = BINANCE.discover_pairs()
+        kraken_pairs = KRAKEN.discover_pairs()
+    except Exception as e:
+        return JSONResponse(
+            {"error": f"Failed to query exchanges: {e}"},
+            status_code=502,
+        )
+
+    common_pairs = binance_pairs & kraken_pairs
+    # All currencies that appear in common pairs
+    available = sorted({c for pair in common_pairs for c in pair})
+
+    return {
+        "available_currencies": available,
+        "common_pairs": sorted([list(p) for p in common_pairs]),
+        "selected_currencies": _state.get("selected_currencies", []),
+    }
+
+
+@app.get("/api/currencies")
+def get_currencies():
+    """Return current selected currencies, auto-assigned roles, and generated markets."""
+    currencies = _state.get("currencies", {})
+    markets = _state.get("markets", {})
+    return {
+        "selected": _state.get("selected_currencies", []),
+        "roles": currencies,
+        "markets": {k: v for k, v in markets.items()},
+    }
+
+
+class CurrencyUpdateBody(BaseModel):
+    currencies: list[str]
+
+
+@app.put("/api/currencies")
+def update_currencies(body: CurrencyUpdateBody):
+    """Save selected currencies to .env and return restart-required message."""
+    if not body.currencies:
+        return JSONResponse({"error": "At least one currency must be selected"}, status_code=400)
+
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    new_value = ",".join(c.strip().upper() for c in body.currencies)
+
+    # Read existing .env
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+
+    # Update or append ARBY_CURRENCIES
+    found = False
+    new_lines = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip()
+        if key == "ARBY_CURRENCIES":
+            new_lines.append(f"ARBY_CURRENCIES={new_value}\n")
+            found = True
+        else:
+            new_lines.append(line)
+
+    if not found:
+        new_lines.append(f"ARBY_CURRENCIES={new_value}\n")
+
+    with open(env_path, "w") as f:
+        f.writelines(new_lines)
+
+    return {
+        "currencies": body.currencies,
+        "message": "Restart required for changes to take effect",
+    }

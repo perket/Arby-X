@@ -13,6 +13,8 @@ import type {
   Trade,
   BalancePoint,
   ConfigResponse,
+  CurrencyDiscovery,
+  CurrencyConfig,
 } from "../types";
 
 export function useStatus() {
@@ -111,5 +113,21 @@ export function useConfig() {
   return useQuery<ConfigResponse>({
     queryKey: ["config"],
     queryFn: () => api.get("/api/config").then((r) => r.data),
+  });
+}
+
+export function useCurrencyDiscovery(enabled: boolean) {
+  return useQuery<CurrencyDiscovery>({
+    queryKey: ["currencies", "discover"],
+    queryFn: () => api.get("/api/currencies/discover").then((r) => r.data),
+    enabled,
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+export function useCurrencyConfig() {
+  return useQuery<CurrencyConfig>({
+    queryKey: ["currencies", "config"],
+    queryFn: () => api.get("/api/currencies").then((r) => r.data),
   });
 }
