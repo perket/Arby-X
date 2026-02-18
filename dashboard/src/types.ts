@@ -1,12 +1,12 @@
 export interface StatusResponse {
   mode: "dry-run" | "live";
   uptime_seconds: number;
-  routes: { direct: number; multi_leg: number; total: number };
+  routes: { direct: number; multi_leg: number; cross: number; total: number };
   exchange_health: Record<string, "connected" | "disconnected">;
 }
 
 export interface LiveComparison {
-  route_type: "direct" | "multi_leg";
+  route_type: "direct" | "multi_leg" | "cross";
   route_label: string;
   spread_pct: number;
   buy_rate: number;
@@ -26,7 +26,7 @@ export interface WalletsResponse {
 export interface Opportunity {
   id: number;
   ts: string;
-  route_type: "direct" | "multi_leg";
+  route_type: "direct" | "multi_leg" | "cross";
   route_label: string;
   buy_exchange: string;
   sell_exchange: string;
@@ -97,6 +97,7 @@ export interface ConfigResponse {
   mode: string;
   uptime_seconds: number;
   routes_count: number;
+  min_profit?: number;
   keys: Record<string, string>;
 }
 

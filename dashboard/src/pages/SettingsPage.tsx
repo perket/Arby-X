@@ -109,6 +109,42 @@ export default function SettingsPage() {
         </div>
       )}
 
+      {/* Trading Parameters */}
+      <div className="bg-surface-card rounded border border-gray-700 p-4 space-y-4">
+        <h2 className="text-sm font-medium text-gray-400 uppercase tracking-wider">
+          Trading Parameters
+        </h2>
+        <div className="space-y-1">
+          <label className="text-xs text-gray-400">
+            Minimum Profit Target (per trade cycle)
+          </label>
+          <div className="flex gap-2">
+            <div className="flex-1 relative">
+              <input
+                type="text"
+                placeholder={
+                  config?.min_profit != null
+                    ? String(config.min_profit)
+                    : "0.001"
+                }
+                value={edits["ARBY_MIN_PROFIT"] ?? ""}
+                onChange={(e) =>
+                  setEdits((prev) => ({
+                    ...prev,
+                    ARBY_MIN_PROFIT: e.target.value,
+                  }))
+                }
+                className="w-full bg-surface border border-gray-600 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-accent-blue placeholder:text-gray-600"
+              />
+            </div>
+          </div>
+          <div className="text-xs text-gray-600">
+            Current: {config?.min_profit ?? "0.001"} (
+            {((config?.min_profit ?? 0.001) * 100).toFixed(2)}%)
+          </div>
+        </div>
+      </div>
+
       {/* API Keys */}
       <div className="bg-surface-card rounded border border-gray-700 p-4 space-y-4">
         <h2 className="text-sm font-medium text-gray-400 uppercase tracking-wider">

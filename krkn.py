@@ -77,10 +77,12 @@ class KRAKEN:
         }
         try:
             res = requests.post(self.base_url + uri_path, headers=headers, data=data, timeout=10)
+            logger.debug("Kraken %s response status: %d", endpoint, res.status_code)
             r = res.json()
             if r.get("error") and len(r["error"]) > 0:
                 logger.error("Kraken API error (%s): %s", endpoint, r["error"])
                 return None
+            logger.debug("Kraken %s result keys: %s", endpoint, list(r.get("result", {}).keys()) if isinstance(r.get("result"), dict) else type(r.get("result")))
             return r.get("result")
         except Exception as e:
             logger.error("Kraken request failed (%s): %s", endpoint, e)
@@ -196,6 +198,7 @@ class KRAKEN:
         if result is None:
             return None
 
+        logger.debug("Kraken raw balances: %s", result)
         balances = {}
         for asset, balance in result.items():
             currency = from_kraken_asset(asset)
@@ -206,4 +209,9 @@ class KRAKEN:
                     "reserved": Decimal("0"),
                     "total": bal,
                 }
+        if not balances:
+            logger.warning(
+                "Kraken balance: no matching currencies. Raw assets: %s, expected: %s",
+                list(result.keys()), list(self.currencies.keys()),
+            )
         return balances if balances else None

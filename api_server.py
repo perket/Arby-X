@@ -69,6 +69,7 @@ def get_status():
     routes = _state.get("routes", [])
     direct = sum(1 for r in routes if r["type"] == "direct")
     multi_leg = sum(1 for r in routes if r["type"] == "multi_leg")
+    cross = sum(1 for r in routes if r["type"] == "cross")
 
     exchange_health = {}
     with _state["order_book_lock"]:
@@ -83,7 +84,7 @@ def get_status():
     return {
         "mode": "dry-run" if _state.get("dry_run") else "live",
         "uptime_seconds": round(uptime, 1),
-        "routes": {"direct": direct, "multi_leg": multi_leg, "total": len(routes)},
+        "routes": {"direct": direct, "multi_leg": multi_leg, "cross": cross, "total": len(routes)},
         "exchange_health": exchange_health,
     }
 
@@ -301,6 +302,7 @@ def get_config():
         "mode": "dry-run" if _state.get("dry_run") else "live",
         "uptime_seconds": round(time() - _state.get("bot_start_time", time()), 1),
         "routes_count": len(_state.get("routes", [])),
+        "min_profit": float(os.environ.get("ARBY_MIN_PROFIT", "0.001")),
         "keys": {
             "BINANCE_API_KEY": mask("BINANCE_API_KEY"),
             "BINANCE_API_SECRET": mask("BINANCE_API_SECRET"),
@@ -313,7 +315,7 @@ def get_config():
 @app.put("/api/config")
 def update_config(body: dict):
     env_path = os.path.join(os.path.dirname(__file__), ".env")
-    allowed_keys = {"BINANCE_API_KEY", "BINANCE_API_SECRET", "KRAKEN_API_KEY", "KRAKEN_API_SECRET"}
+    allowed_keys = {"BINANCE_API_KEY", "BINANCE_API_SECRET", "KRAKEN_API_KEY", "KRAKEN_API_SECRET", "ARBY_MIN_PROFIT"}
     updates = {k: v for k, v in body.items() if k in allowed_keys and v}
 
     if not updates:
