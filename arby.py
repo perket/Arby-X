@@ -86,6 +86,7 @@ def auto_assign_roles(selected, common_pairs):
 
 # Load currencies with auto-role assignment, fallback to hardcoded defaults
 selected_currencies = _load_currencies()
+_common_pairs = set()
 try:
     _common_pairs = _discover_common_pairs()
     currencies = auto_assign_roles(selected_currencies, _common_pairs)
@@ -130,6 +131,7 @@ markets = {
     for trade, x in currencies.items()
     for base, v in currencies.items()
     if v < 2 and x >= 1 and base != trade
+    and (not _common_pairs or (trade, base) in _common_pairs)
 }
 
 
